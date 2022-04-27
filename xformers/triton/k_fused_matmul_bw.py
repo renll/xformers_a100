@@ -83,20 +83,23 @@ def kernel_bw_act(
 
 
 # fmt: off
+@triton.heuristics({
+    'EVEN_BLOCKS': lambda args:
+        args["K"] % (args['BLOCK_K']) == 0
+        and args["M"] % (args['BLOCK_M']) == 0
+        and args["N"] % (args['BLOCK_N']) == 0,
+})
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}, num_stages=5, num_warps=1),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}, num_stages=5, num_warps=1),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}, num_stages=5, num_warps=2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, num_stages=5, num_warps=2),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=4, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=4, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=4),
-        # requires a GPU with enough shared memory
-        # triton.Config({"BLOCK_M": 32, "BLOCK_N": 256}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_M": 256, "BLOCK_N": 32}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_stages=3, num_warps=8),
-        # triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 256, 'BLOCK_M': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 256, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 256, 'BLOCK_K': 64, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 256, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 32, 'BLOCK_M': 32}, num_stages=5, num_warps=2),
     ],
     key=["M", "N", "K"],
 )
@@ -109,6 +112,7 @@ def kernel_matmul_transpose(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr, GROUP_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    EVEN_BLOCKS: tl.constexpr
 ):
     # fmt: on
 
@@ -136,7 +140,7 @@ def kernel_matmul_transpose(
     first_pid_n = group_id * GROUP_N  # row-id of the first program in the group
     GROUP_N = min(
         num_pid_n - first_pid_n, GROUP_N
-    )  # if `num_pid_m` isn't divisible by `GROUP_N`, the last group is smaller
+    )
 
     # *within groups*, programs are ordered in a column-major order
     # row-id /col-id of the program in the *launch grid*
@@ -159,19 +163,37 @@ def kernel_matmul_transpose(
 
     # block level matrix multiplication.
     # We fetch a block memory block from both inputs, matmul and accumulate, then repeat
-    mask_rn = rn < N
-    mask_rk = rk < K
+    if EVEN_BLOCKS:
+        other = None
+        mask_rn = None
+        mask_rk = None
+    else:
+        other = 0.0
+        mask_rn = rn < N
+        mask_rk = rk < K
 
     for i in range(0, M, BLOCK_M):
         rm = tl.arange(0, BLOCK_M) + i
-        a = tl.load(a_ptrs + rm[None, :] * stride_am, mask=((rm[None, :] < M) & mask_rn[:, None]), other=0.0)
-        b = tl.load(b_ptrs + rm[:, None] * stride_bm, mask=((mask_rk[None, :] < K) & rm[:, None] < M), other=0.0)
+
+        if EVEN_BLOCKS:
+            mask_a = None
+            mask_b = None
+        else:
+            mask_a = ((rm[None, :] < M) & mask_rn[:, None])         # type: ignore
+            mask_b = ((mask_rk[None, :] < K) & rm[:, None] < M)     # type: ignore
+
+        a = tl.load(a_ptrs + rm[None, :] * stride_am, mask=mask_a, other=other)
+        b = tl.load(b_ptrs + rm[:, None] * stride_bm, mask=mask_b, other=other)
 
         acc += tl.dot(a, b)
 
     # write back result
     out_ptrs = OUT + rn[:, None] * stride_on + rk[None, :]
-    tl.store(out_ptrs, acc, mask=mask_rn[:, None] & mask_rk[None, :])
+    if EVEN_BLOCKS:
+        mask_out = None
+    else:
+        mask_out = mask_rn[:, None] & mask_rk[None, :]      # type: ignore
+    tl.store(out_ptrs, acc, mask=mask_out)
 
 
 def fused_matmul_backward(
@@ -227,24 +249,28 @@ def fused_matmul_backward(
 
     # Compute the gradient for the weight
     if trainable_weight:
-        grid_ = lambda META: (triton.cdiv(N, META["BLOCK_N"]) * triton.cdiv(K, META["BLOCK_K"]),) # noqa
-
-        grad_weight = torch.empty_like(weight)
         inputs_ = inputs if inputs.ndim == 2 else inputs.flatten(0, 1)
 
-        # fmt: off
-        kernel_bw_act[grid_](
-            grad_weight, grad_out_, inputs_,        # data ptrs
-            M, N, K,                                # shapes
-            grad_weight.stride(0),
-            grad_out_.stride(0),
-            inputs_.stride(0)
-        )
-        # fmt: on
+        if False:
+            grid_ = lambda META: (triton.cdiv(N, META["BLOCK_N"]) * triton.cdiv(K, META["BLOCK_K"]),) # noqa
 
-    # The following ops can also be handled by triton
+            grad_weight = torch.empty_like(weight)
+
+            # fmt: off
+            kernel_matmul_transpose[grid_](
+                grad_weight, grad_out_, inputs_,        # data ptrs
+                M, N, K,                                # shapes
+                grad_weight.stride(0),
+                grad_out_.stride(0),
+                inputs_.stride(0),
+                GROUP_N=8,
+            )
+            # fmt: on
+        else:
+            grad_weight = grad_out_.transpose(0, 1) @ inputs_
+
+    # Epilogue, could probably be better handled
     grad_in = grad_out_ @ weight
-
     grad_bias = sum_2d_dim_0(grad_out_) if trainable_bias else None
 
     return grad_in.reshape_as(inputs), grad_weight if trainable_weight else None, grad_bias

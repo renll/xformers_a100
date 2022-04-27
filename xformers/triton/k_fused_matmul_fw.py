@@ -13,20 +13,23 @@ import triton.language as tl
 
 
 # fmt: off
+@triton.heuristics({
+    'EVEN_BLOCKS': lambda args:
+        args["K"] % (args['BLOCK_K']) == 0
+        and args["M"] % (args['BLOCK_M']) == 0
+        and args["N"] % (args['BLOCK_N']) == 0,
+})
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_M": 16, "BLOCK_N": 16}, num_stages=5, num_warps=1),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 32}, num_stages=5, num_warps=1),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}, num_stages=5, num_warps=2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, num_stages=5, num_warps=2),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=4, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=4, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=4),
-        # requires a GPU with enough shared memory
-        # triton.Config({"BLOCK_M": 32, "BLOCK_N": 256}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_M": 256, "BLOCK_N": 32}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_stages=3, num_warps=8),
-        # triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 256, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=5, num_warps=2),
     ],
     key=["M", "N", "K"],
 )
@@ -47,6 +50,7 @@ def kernel_fma(
     BIAS: tl.constexpr,
     SAVE_ACT_INPUTS: tl.constexpr,
     ACTIVATION: tl.constexpr,
+    EVEN_BLOCKS: tl.constexpr
 ):
     # fmt: on
 
@@ -105,20 +109,38 @@ def kernel_fma(
 
     # block level matrix multiplication.
     # We fetch a block memory block from both inputs, matmul and accumulate, then repeat
-    mask_rn = rn < N
-    mask_rm = rm < M
+
+    if EVEN_BLOCKS:
+        other = None
+        mask_rn = None
+        mask_rm = None
+    else:
+        other = 0.0
+        mask_rn = rn < N
+        mask_rm = rm < M
 
     for i in range(0, K, BLOCK_K):
         rk = tl.arange(0, BLOCK_K) + i
-        a = tl.load(input_ptrs + rk[None, :], mask=((rk[None, :] < K) & mask_rm[:, None]), other=0.0)
-        w = tl.load(weight_ptrs + rk[:, None], mask=((rk[:, None] < K) & mask_rn[None, :]), other=0.0)
+        if EVEN_BLOCKS:
+            mask_a = None
+            mask_w = None
+        else:
+            mask_a = (rk[None, :] < K) & mask_rm[:, None]   # type: ignore
+            mask_w = (rk[:, None] < K) & mask_rn[None, :]   # type: ignore
+
+        a = tl.load(input_ptrs + rk[None, :], mask=mask_a, other=other)
+        w = tl.load(weight_ptrs + rk[:, None], mask=mask_w, other=other)
 
         acc += tl.dot(a, w)
 
     # optional: save the activation inputs
     if SAVE_ACT_INPUTS:
         act_in_ptrs = ACT_INPUTS + rm[:, None] * stride_om + rn[None, :]
-        tl.store(act_in_ptrs, acc, mask=mask_rm[:, None] & mask_rn[None, :])
+        if EVEN_BLOCKS:
+            mask_act = None
+        else:
+            mask_act = mask_rm[:, None] & mask_rn[None, :]  # type: ignore
+        tl.store(act_in_ptrs, acc, mask=mask_act)
 
     # optional: fused activation (while the data is in shared memory)
     if ACTIVATION:
@@ -126,7 +148,12 @@ def kernel_fma(
 
     # write back result
     out_ptrs = OUT + rm[:, None] * stride_om + rn[None, :]
-    tl.store(out_ptrs, acc, mask=mask_rm[:, None] & mask_rn[None, :])
+    if EVEN_BLOCKS:
+        mask_out = None
+    else:
+        mask_out = mask_rm[:, None] & mask_rn[None, :]  # type: ignore
+
+    tl.store(out_ptrs, acc, mask=mask_out)
 
 
 # Activation needs to be a triton kernel
@@ -175,7 +202,6 @@ def fused_matmul(
         ACTIVATION=activation,                      # optional fused activation
         BIAS=bias is not None,                      # optional fused bias
         GROUP_M=8,                                  # speed optimization: group the programs
-        BLOCK_K=32,
         SAVE_ACT_INPUTS=save_act_inputs
     )
     # fmt: on
