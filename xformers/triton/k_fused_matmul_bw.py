@@ -130,7 +130,8 @@ def kernel_matmul_transpose(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr, GROUP_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    EVEN_BLOCKS: tl.constexpr
+    EVEN_BLOCKS: tl.constexpr,
+    SPLIT_K: tl.constexpr  # not being used, here for config compatibility
 ):
     # fmt: on
 
