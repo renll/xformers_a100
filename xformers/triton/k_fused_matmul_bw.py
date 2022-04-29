@@ -9,8 +9,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from triton.ops.matmul import get_configs_io_bound
-from triton.ops.matmul_perf_model import early_config_prune, estimate_matmul_time
 
 from xformers.triton.sum_strided import sum_2d_dim_0
 
@@ -21,10 +19,10 @@ from xformers.triton.sum_strided import sum_2d_dim_0
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=5, num_warps=2),
-        triton.Config({}, num_stages=3, num_warps=4),
-        triton.Config({}, num_stages=3, num_warps=8),
-        triton.Config({}, num_stages=3, num_warps=8),
+        triton.Config({}, num_warps=2),
+        triton.Config({}, num_warps=4),
+        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=16),
     ],
     key=["M", "N"],
 )
@@ -108,41 +106,18 @@ def kernel_bw_act(
 })
 @triton.autotune(
     configs=[
-        # basic configs for compute-bound matmuls
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 256, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 256, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 32, 'SPLIT_K': 1}, num_stages=5, num_warps=2),
-        # good for int8
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 128, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 128, 'SPLIT_K': 1}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 128, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 256, 'BLOCK_K': 128, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 128, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 64, 'SPLIT_K': 1}, num_stages=5, num_warps=2),
-    ] + get_configs_io_bound(),
+        triton.Config({"BLOCK_K": 16, "BLOCK_N": 16}, num_stages=5, num_warps=1),
+        triton.Config({"BLOCK_K": 32, "BLOCK_N": 32}, num_stages=5, num_warps=1),
+        triton.Config({"BLOCK_K": 64, "BLOCK_N": 32}, num_stages=5, num_warps=2),
+        triton.Config({"BLOCK_K": 32, "BLOCK_N": 64}, num_stages=5, num_warps=2),
+        triton.Config({"BLOCK_K": 128, "BLOCK_N": 64}, num_stages=4, num_warps=4),
+        triton.Config({"BLOCK_K": 64, "BLOCK_N": 128}, num_stages=4, num_warps=4),
+        triton.Config({"BLOCK_K": 128, "BLOCK_N": 128}, num_stages=3, num_warps=4),
+        triton.Config({"BLOCK_K": 64, "BLOCK_N": 256}, num_stages=4, num_warps=8),
+        triton.Config({"BLOCK_K": 256, "BLOCK_N": 64}, num_stages=4, num_warps=8),
+        triton.Config({"BLOCK_K": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+    ],
     key=["M", "N", "K"],
-    prune_configs_by={
-        'early_config_prune': early_config_prune,
-        'perf_model': estimate_matmul_time,
-        'top_k': 10
-    },
 )
 @triton.jit
 def kernel_matmul_transpose(
@@ -154,7 +129,6 @@ def kernel_matmul_transpose(
     BLOCK_N: tl.constexpr, GROUP_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     EVEN_BLOCKS: tl.constexpr,
-    SPLIT_K: tl.constexpr  # not being used, here for config compatibility
 ):
     # fmt: on
 
@@ -210,17 +184,19 @@ def kernel_matmul_transpose(
         mask_rk = rk < K
 
     for m_step in range(0, M, BLOCK_M):
-        rm_step = rm + m_step
 
         if EVEN_BLOCKS:
-            a = tl.load(a_ptrs + rm_step[None, :] * stride_am)
-            b = tl.load(b_ptrs + rm_step[:, None] * stride_bm)
+            a = tl.load(a_ptrs + rm[None, :] * stride_am)
+            b = tl.load(b_ptrs + rm[:, None] * stride_bm)
+            a_ptrs += BLOCK_M * stride_am
+            b_ptrs += BLOCK_M * stride_bm
         else:
-            a = tl.load(a_ptrs + rm_step[None, :] * stride_am,
-                        mask=((rm_step[None, :] < M) & mask_rn[:, None]), other=0.0)
+            rms = rm + m_step   # keep track of a possible out of bounds
+            a = tl.load(a_ptrs + rms[None, :] * stride_am,
+                        mask=((rms[None, :] < M) & mask_rn[:, None]), other=0.0)
 
-            b = tl.load(b_ptrs + rm_step[:, None] * stride_bm,
-                        mask=((mask_rk[None, :] < K) & rm_step[:, None] < M), other=0.0)
+            b = tl.load(b_ptrs + rms[:, None] * stride_bm,
+                        mask=((mask_rk[None, :] < K) & rms[:, None] < M), other=0.0)
 
         acc += tl.dot(a, b)
 
@@ -272,8 +248,8 @@ def fused_matmul_backward(
         if act_in is None:
             act_in = grad_out_
 
-        BLOCK_M = min(triton.next_power_of_2(M), 2048)
-        BLOCK_N = 16
+        BLOCK_M = min(triton.next_power_of_2(M), 512)
+        BLOCK_N = 64
         grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"])) # noqa
 
         # Opportunistically compute grad bias if required
@@ -296,7 +272,12 @@ def fused_matmul_backward(
         )
         # fmt: on
 
-        grad_bias = sum_2d_dim_0(grad_bias) if trainable_bias else None
+        if trainable_bias:
+            grad_bias.squeeze_()
+            if grad_bias.ndim == 2:
+                grad_bias = sum_2d_dim_0(grad_bias)
+        else:
+            grad_bias = None
 
         # Backpropagation going up, the reference gradient is now
         # just before the activation
@@ -318,7 +299,8 @@ def fused_matmul_backward(
                 grad_weight.stride(0),
                 grad_out_.stride(0),
                 inputs_.stride(0),
-                GROUP_N=8,
+                GROUP_N=8 if inputs.dtype == torch.float16 else 4,
+                BLOCK_M=64
             )
             # fmt: on
         else:
@@ -327,7 +309,7 @@ def fused_matmul_backward(
     # Epilogue, could probably be better handled. About half the time
     grad_in = triton.ops.matmul(grad_out_, weight)
 
-    if grad_bias is None and trainable_bias:
+    if grad_bias is None and trainable_bias:  # If there was no activation, fallback
         grad_bias = sum_2d_dim_0(grad_out_)
 
     return grad_in.reshape_as(inputs), grad_weight if trainable_weight else None, grad_bias
