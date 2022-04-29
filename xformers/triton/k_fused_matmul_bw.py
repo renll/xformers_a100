@@ -113,9 +113,11 @@ def kernel_bw_act(
         triton.Config({"BLOCK_K": 128, "BLOCK_N": 64}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_K": 64, "BLOCK_N": 128}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_K": 128, "BLOCK_N": 128}, num_stages=3, num_warps=4),
-        triton.Config({"BLOCK_K": 64, "BLOCK_N": 256}, num_stages=4, num_warps=8),
-        triton.Config({"BLOCK_K": 256, "BLOCK_N": 64}, num_stages=4, num_warps=8),
-        triton.Config({"BLOCK_K": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_K": 64, "BLOCK_N": 256}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_K": 256, "BLOCK_N": 64}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_K": 256, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_K": 128, "BLOCK_N": 256}, num_stages=3, num_warps=8),
+
     ],
     key=["M", "N", "K"],
 )
@@ -239,7 +241,6 @@ def fused_matmul_backward(
     N, K = weight.shape
 
     # Compute the gradient for the activation + bias
-    # Very fast typically
     if activation_grad is not None:
         grad_act = torch.empty_like(grad_out_)
 
@@ -283,7 +284,7 @@ def fused_matmul_backward(
         # just before the activation
         grad_out_ = grad_act
 
-    # Compute the gradient for the weight. About half the time
+    # Compute the gradient for the weight.
     if trainable_weight:
         inputs_ = inputs if inputs.ndim == 2 else inputs.flatten(0, 1)
 
@@ -299,15 +300,15 @@ def fused_matmul_backward(
                 grad_weight.stride(0),
                 grad_out_.stride(0),
                 inputs_.stride(0),
-                GROUP_N=8 if inputs.dtype == torch.float16 else 4,
+                GROUP_N=8,
                 BLOCK_M=64
             )
             # fmt: on
         else:
             grad_weight = grad_out_.transpose(0, 1) @ inputs_
 
-    # Epilogue, could probably be better handled. About half the time
-    grad_in = triton.ops.matmul(grad_out_, weight)
+    # Epilogue, could probably be better handled.
+    grad_in = grad_out_ @ weight
 
     if grad_bias is None and trainable_bias:  # If there was no activation, fallback
         grad_bias = sum_2d_dim_0(grad_out_)

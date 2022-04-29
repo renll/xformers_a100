@@ -28,9 +28,10 @@ import triton.language as tl
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_stages=4, num_warps=8),
-        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_stages=4, num_warps=8),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_M": 256, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}, num_stages=3, num_warps=8),
     ],
     key=["M", "N", "K"],
 )
@@ -190,7 +191,6 @@ def fused_matmul(
 
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),) # noqa
-    GROUP_M = 8 if x.dtype == torch.float16 else 4
 
     # fmt: off
     kernel_fma[grid](
@@ -201,7 +201,7 @@ def fused_matmul(
         weight.stride(0),
         ACTIVATION=activation,                      # optional fused activation
         BIAS=bias is not None,                      # optional fused bias
-        GROUP_M=GROUP_M,                            # speed optimization: group the programs
+        GROUP_M=8,                            # speed optimization: group the programs
         BLOCK_K=64,
         SAVE_ACT_INPUTS=save_act_inputs
     )

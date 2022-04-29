@@ -67,9 +67,8 @@ def bench_linear(activations: List[Optional[Activation]]):
         torch.float16,
         torch.float32,
     ]:
-        for backward in [True, False]:
-
-            for activation in activations:
+        for activation in activations:
+            for backward in [False, True]:
                 results: Dict[str, Any] = {}
 
                 for bias in [False, True]:
