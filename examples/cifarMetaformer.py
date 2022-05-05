@@ -185,7 +185,7 @@ if __name__ == "__main__":
         steps=steps,
         image_size=image_size,
         num_classes=num_classes,
-        attention="scaled_dot_product",
+        attention="pooling",
         layer_norm_style="pre",
         use_rotary_embeddings=True,
     )
