@@ -5,7 +5,7 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/Atomic.cuh>
+#include <THC/THCAtomics.cuh>
 
 #include "sputnik/vector_utils.h"
 

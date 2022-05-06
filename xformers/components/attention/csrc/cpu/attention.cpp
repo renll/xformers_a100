@@ -4,8 +4,8 @@
 #include <cmath>
 #include <vector>
 
-#include <ATen/cpu/vec/functional.h>
-#include <ATen/cpu/vec/vec.h>
+#include <ATen/cpu/vec256/functional.h>
+#include <ATen/cpu/vec256/vec256.h>
 
 namespace {
 
